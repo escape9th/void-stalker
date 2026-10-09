@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VOID STALKER · 虚空尾随者</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; height: 100%; }
+  body { cursor: crosshair; font-family: "Courier New", Consolas, monospace; }
+  canvas { display: block; }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 5;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.85) 100%);
+  }
+  #hud {
+    position: fixed; top: 18px; left: 20px; z-index: 6; pointer-events: none;
+    color: #6f7a86; font-size: 14px; letter-spacing: 3px; text-shadow: 0 0 6px #000;
+  }
+  #overlay {
+    position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    color: #b9b9b9; background: rgba(3,3,6,.88); letter-spacing: 2px;
+    transition: opacity .4s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay h1 { font-size: 34px; letter-spacing: 12px; margin: 0 0 14px; color: #cfcfcf; font-weight: normal; }
+  #overlay .sub { opacity: .65; margin: 4px 0; font-size: 14px; }
+  #overlay .red { color: #d44; letter-spacing: 6px; }
+  #overlay .win { color: #7fd7c0; letter-spacing: 6px; }
+</style>
+</head>
+<body>
+<div id="vignette"></div>
+<div id="hud">碎片 <span id="count">0</span>/<span id="total">7</span></div>
+<div id="overlay">
+  <h1>VOID STALKER</h1>
+  <p class="sub">你在一片无边的黑雾里。收集微光碎片，才能醒来。</p>
+  <p class="sub">但雾里，有东西在跟着你。</p>
+  <p class="sub" style="margin-top: 22px; opacity: .45;">点击开始 · WASD 移动 · 鼠标看方向 · ESC 暂停</p>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+/* ---------------- 基础场景 ---------------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x040408);
+scene.fog = new THREE.FogExp2(0x040408, 0.03);
+
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 300);
+camera.position.set(0, 1.7, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+/* ---------------- 微弱参照物：星点 + 地面网格 ---------------- */
+function makeStars() {
+  const g = new THREE.BufferGeometry();
+  const n = 220, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const r = 60 + Math.random() * 180;
+    const t = Math.random() * Math.PI * 2;
+    const p = Math.random() * Math.PI - Math.PI / 2;
+    pos[i*3] = Math.cos(t) * Math.cos(p) * r;
+    pos[i*3+1] = Math.sin(p) * r;
+    pos[i*3+2] = Math.sin(t) * Math.cos(p) * r;
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const m = new THREE.PointsMaterial({ color: 0x2a2f3a, size: 0.35, sizeAttenuation: true });
+  return new THREE.Points(g, m);
+}
+scene.add(makeStars());
+
+const grid = new THREE.GridHelper(240, 60, 0x14171c, 0x0a0c10);
+grid.position.y = -0.02;
+grid.material.transparent = true;
+grid.material.opacity = 0.4;
+scene.add(grid);
+
+/* ---------------- 微光碎片（可收集的"灯塔"） ---------------- */
+const SHARD_COUNT = 7;
+const shards = [];
+const shardGeo = new THREE.OctahedronGeometry(0.55, 0);
+for (let i = 0; i < SHARD_COUNT; i++) {
+  const a = Math.random() * Math.PI * 2;
+  const r = 10 + Math.random() * 38;
+  const mat = new THREE.MeshBasicMaterial({ color: 0x66ffff });
+  mat.fog = false;                       // 无视雾，始终发光，从远处就能看见
+  const shard = new THREE.Mesh(shardGeo, mat);
+  shard.position.set(Math.cos(a) * r, 0.9 + Math.random() * 1.4, Math.sin(a) * r);
+  shard.userData = { phase: Math.random() * Math.PI * 2 };
+  scene.add(shard);
+  shards.push(shard);
+}
+
+/* ---------------- 尾随者：雾里的抽象几何体 ---------------- */
+const shape = new THREE.Group();
+const bodyGeo = new THREE.IcosahedronGeometry(2.3, 1);
+const body = new THREE.Mesh(bodyGeo, new THREE.MeshStandardMaterial({
+  color: 0x000000, roughness: 0.9, metalness: 0.2
+}));
+const wire = new THREE.Mesh(
+  new THREE.IcosahedronGeometry(2.45, 1),
+  new THREE.MeshBasicMaterial({ color: 0x330000, wireframe: true, transparent: true, opacity: 0.6 })
+);
+const glow = new THREE.PointLight(0x550000, 6, 22, 2);
+shape.add(body, wire, glow);
+// 随机出现在玩家后方远处
+const startA = Math.random() * Math.PI * 2;
+shape.position.set(Math.cos(startA) * 42, 3.2, Math.sin(startA) * 42);
+scene.add(shape);
+
+/* ---------------- 控制 ---------------- */
+const controls = new PointerLockControls(camera, document.body);
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+/* ---------------- 音频（Web Audio，全程序生成，无外部文件） ---------------- */
+let actx = null, droneGain = null, droneOsc = null, droneOsc2 = null, noiseBuf = null;
+function initAudio() {
+  if (actx) return;
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  const master = actx.createGain(); master.gain.value = 0.55; master.connect(actx.destination);
+
+  droneGain = actx.createGain(); droneGain.gain.value = 0; droneGain.connect(master);
+  const filt = actx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 160; filt.connect(droneGain);
+  droneOsc = actx.createOscillator(); droneOsc.type = 'sawtooth'; droneOsc.frequency.value = 34;
+  droneOsc2 = actx.createOscillator(); droneOsc2.type = 'sawtooth'; droneOsc2.frequency.value = 34.8;
+  droneOsc.connect(filt); droneOsc2.connect(filt);
+  droneOsc.start(); droneOsc2.start();
+
+  noiseBuf = actx.createBuffer(1, actx.sampleRate * 0.6, actx.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+function chime() {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = 'sine'; o.frequency.value = 660;
+  g.gain.setValueAtTime(0.15, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.25);
+  o.connect(g); g.connect(actx.destination);
+  o.start(); o.stop(actx.currentTime + 0.26);
+}
+function thump() {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(70, actx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(38, actx.currentTime + 0.12);
+  g.gain.setValueAtTime(0.5, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.2);
+  o.connect(g); g.connect(actx.destination);
+  o.start(); o.stop(actx.currentTime + 0.22);
+}
+function boom() {
+  if (!actx) return;
+  const src = actx.createBufferSource(); src.buffer = noiseBuf;
+  const g = actx.createGain(); g.gain.value = 0.6;
+  const filt = actx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 900;
+  src.connect(filt); filt.connect(g); g.connect(actx.destination);
+  src.start();
+}
+
+/* ---------------- 游戏状态 ---------------- */
+let collected = 0, state = 'start';   // start | playing | dead | win
+let lastBeat = 0;
+
+const overlay = document.getElementById('overlay');
+const countEl = document.getElementById('count');
+const h1 = overlay.querySelector('h1');
+const subs = overlay.querySelectorAll('.sub');
+
+function setOverlay(title, lines, cls) {
+  h1.textContent = title;
+  h1.className = cls || '';
+  subs.forEach((p, i) => { p.textContent = lines[i] || ''; });
+}
+overlay.addEventListener('click', () => {
+  if (state === 'dead' || state === 'win') { location.reload(); return; }
+  initAudio();
+  if (actx && actx.state === 'suspended') actx.resume();
+  controls.lock();
+});
+controls.addEventListener('lock', () => {
+  if (state === 'playing') overlay.classList.add('hidden');
+  else { state = 'playing'; setOverlay('', []); overlay.classList.add('hidden'); }
+});
+controls.addEventListener('unlock', () => {
+  if (state === 'playing') {
+    overlay.classList.remove('hidden');
+    setOverlay('已暂停', ['点击继续 · ESC 已解锁'], '');
+  }
+});
+
+function die() {
+  state = 'dead';
+  boom();
+  overlay.classList.remove('hidden');
+  setOverlay('IT SAW YOU', ['它还在看着你。', '', '点击重新开始'], 'red');
+  controls.unlock();
+}
+function win() {
+  state = 'win';
+  overlay.classList.remove('hidden');
+  setOverlay('你醒了', ['雾散了。你收集到了所有碎片。', '', '点击再来一次'], 'win');
+  controls.unlock();
+}
+
+/* ---------------- 主循环 ---------------- */
+const clock = new THREE.Clock();
+const forward = new THREE.Vector3();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const t = clock.elapsedTime;
+
+  if (state === 'playing') {
+    // 移动
+    const speed = 7.5;
+    if (keys.KeyW) controls.moveForward(speed * dt);
+    if (keys.KeyS) controls.moveForward(-speed * dt);
+    if (keys.KeyA) controls.moveRight(-speed * dt);
+    if (keys.KeyD) controls.moveRight(speed * dt);
+    camera.position.y = 1.7;   // 锁地面高度，保持抽象的"悬浮行走"
+
+    // 尾随者：朝玩家以恒定速度逼近（收集越多越快）
+    const chaseSpeed = 2.6 + collected * 0.75;
+    forward.copy(camera.position).sub(shape.position).normalize();
+    shape.position.addScaledVector(forward, chaseSpeed * dt);
+    shape.position.y = Math.max(shape.position.y, 0.6);
+    shape.rotation.y += dt * 0.4;
+    shape.rotation.x += dt * 0.15;
+    const pulse = 1 + Math.sin(t * 2.2) * 0.06;
+    shape.scale.setScalar(pulse);
+
+    // 收集碎片
+    for (let i = shards.length - 1; i >= 0; i--) {
+      const s = shards[i];
+      s.position.y += Math.sin(t * 1.8 + s.userData.phase) * 0.008;
+      s.rotation.y += dt * 1.2;
+      if (s.position.distanceTo(camera.position) < 1.7) {
+        scene.remove(s); shards.splice(i, 1);
+        collected++; countEl.textContent = collected; chime();
+      }
+    }
+    if (collected >= SHARD_COUNT) win();
+
+    // 距离 → 音频强度（靠近时低鸣渐强、心跳加速）
+    const dist = shape.position.distanceTo(camera.position);
+    if (actx) {
+      const near = THREE.MathUtils.clamp(1 - dist / 45, 0, 1);
+      droneGain.gain.value = near * 0.5;
+      droneOsc.frequency.value = 34 + near * 60;
+      droneOsc2.frequency.value = 34.8 + near * 60;
+      if (dist < 16 && t - lastBeat > THREE.MathUtils.lerp(1.0, 0.32, near)) {
+        thump(); lastBeat = t;
+      }
+    }
+    if (dist < 2.1) die();
+  }
+
+  renderer.render(scene, camera);
+}
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+animate();
+</script>
+</body>
+</html>
